@@ -1,0 +1,38 @@
+# Binarios compilados
+vanity_eth.exe
+vanity_eth
+
+# Archivos objeto / intermedios
+*.o
+*.obj
+*.ptx
+*.cubin
+*.fatbin
+
+# Resultados de búsqueda (pueden contener claves privadas)
+found.txt
+found_*.txt
+
+# Script de compilación local (contiene rutas específicas de cada máquina)
+compile.bat
+
+# Archivos de IDE / editores
+.vscode/
+.vs/
+*.suo
+*.user
+*.ncb
+*.sdf
+*.opensdf
+*.vcxproj.user
+.idea/
+
+# Archivos Claude AI (configuración local del asistente)
+.claude/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
