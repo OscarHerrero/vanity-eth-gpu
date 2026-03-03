@@ -9,6 +9,18 @@ Encuentra una dirección con el **prefijo** y/o **sufijo** hexadecimal que quier
 
 ---
 
+## Descarga rápida (Windows)
+
+Si tienes Windows y una GPU NVIDIA RTX 20xx o superior, puedes descargar el binario precompilado directamente:
+
+**[Descargar vanity_eth.exe](https://github.com/OscarHerrero/vanity-eth-gpu/releases/latest/download/vanity_eth.exe)**
+
+No necesitas instalar CUDA Toolkit ni Visual Studio. Descarga, ejecuta y listo.
+
+> Para GTX 10xx o inferiores, o para Linux, compila desde el código fuente (ver [Compilación](#compilación)).
+
+---
+
 ## Índice
 
 - [Requisitos](#requisitos)
@@ -355,8 +367,14 @@ Velocidades aproximadas (pueden variar según driver, temperatura y configuraci�
 
 ## Control de ventiladores
 
+> ⚠️ **Si no ejecutas el programa desde una CMD abierta como Administrador, los ventiladores NO se activarán desde el primer momento**, dejando la GPU trabajando a plena carga sin refrigeración controlada.
+> El autor no se hace responsable de daños en el hardware derivados de no seguir este procedimiento.
+
 - Disponible **solo en Windows** con GPU NVIDIA.
-- Requiere ejecutar `vanity_eth.exe` como **Administrador**.
+- Para que el control de ventiladores funcione debes abrir una **CMD como Administrador** y ejecutar el programa desde ahí:
+  1. Pulsa `Win`, escribe `cmd`, clic derecho → **"Ejecutar como administrador"**
+  2. Navega a la carpeta del programa: `cd ruta\a\vanity_eth`
+  3. Ejecuta: `vanity_eth.exe -p dead -f 100`
 - Usa la librería NVML (carga dinámica, no requiere instalar nada extra).
 - Al terminar o al pulsar `Ctrl+C`, los ventiladores vuelven al modo automático.
 - En Linux, o sin permisos de administrador, el programa continúa normalmente sin tocar los ventiladores.
@@ -449,6 +467,16 @@ Si este proyecto te ha sido útil, puedes invitarme a un café enviando ETH a:
 ```
 
 ¡Gracias!
+
+---
+
+## Aviso legal
+
+Este software se proporciona **tal cual**, sin garantías de ningún tipo.
+
+- El autor no se hace responsable de ningún daño en el hardware (GPU, sistema de refrigeración u otros componentes) derivado del uso de este programa, incluyendo el uso sin el control de ventiladores activo o sin permisos de administrador.
+- Es responsabilidad del usuario asegurarse de que su equipo cuenta con una refrigeración adecuada durante el uso prolongado.
+- El uso de este software implica la aceptación de estos términos.
 
 ---
 
