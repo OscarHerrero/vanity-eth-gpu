@@ -21,9 +21,10 @@
 // Tipos y punteros a funciones NVML (carga dinámica, sin necesidad de nvml.lib)
 typedef void* nvmlDevice_t;
 typedef int   nvmlReturn_t;
-// Políticas de ventilador
+// Políticas de ventilador y temperatura
 #define NVML_FAN_POLICY_TEMPERATURE_CONTINOUS_SW 0  // auto
 #define NVML_FAN_POLICY_MANUAL                   1  // manual
+#define NVML_TEMPERATURE_GPU                     0
 
 typedef nvmlReturn_t (*pfnNvmlInit)(void);
 typedef nvmlReturn_t (*pfnNvmlShutdown)(void);
@@ -31,18 +32,22 @@ typedef nvmlReturn_t (*pfnNvmlDeviceGetHandleByIndex)(unsigned int, nvmlDevice_t
 typedef nvmlReturn_t (*pfnNvmlDeviceGetNumFans)(nvmlDevice_t, unsigned int*);
 typedef nvmlReturn_t (*pfnNvmlDeviceSetFanControlPolicy)(nvmlDevice_t, unsigned int, unsigned int);
 typedef nvmlReturn_t (*pfnNvmlDeviceSetFanSpeed_v2)(nvmlDevice_t, unsigned int, unsigned int);
+typedef nvmlReturn_t (*pfnNvmlDeviceGetTemperature)(nvmlDevice_t, unsigned int, unsigned int*);
+typedef nvmlReturn_t (*pfnNvmlDeviceGetPowerUsage)(nvmlDevice_t, unsigned int*);
 
 static HMODULE      s_nvml_lib    = NULL;
 static nvmlDevice_t s_nvml_device = NULL;
 static unsigned int s_fan_count   = 0;
 static int          s_fan_ready   = 0;
 
-static pfnNvmlInit                   s_nvmlInit                   = NULL;
-static pfnNvmlShutdown               s_nvmlShutdown               = NULL;
-static pfnNvmlDeviceGetHandleByIndex s_nvmlDeviceGetHandleByIndex = NULL;
-static pfnNvmlDeviceGetNumFans       s_nvmlDeviceGetNumFans       = NULL;
-static pfnNvmlDeviceSetFanControlPolicy s_nvmlSetPolicy           = NULL;
-static pfnNvmlDeviceSetFanSpeed_v2   s_nvmlSetFanSpeed            = NULL;
+static pfnNvmlInit                      s_nvmlInit                   = NULL;
+static pfnNvmlShutdown                  s_nvmlShutdown               = NULL;
+static pfnNvmlDeviceGetHandleByIndex    s_nvmlDeviceGetHandleByIndex = NULL;
+static pfnNvmlDeviceGetNumFans          s_nvmlDeviceGetNumFans       = NULL;
+static pfnNvmlDeviceSetFanControlPolicy s_nvmlSetPolicy              = NULL;
+static pfnNvmlDeviceSetFanSpeed_v2      s_nvmlSetFanSpeed            = NULL;
+static pfnNvmlDeviceGetTemperature      s_nvmlGetTemp                = NULL;
+static pfnNvmlDeviceGetPowerUsage       s_nvmlGetPower               = NULL;
 
 static int fan_init(void) {
     // nvml.dll puede estar en System32 o en la carpeta de drivers NVIDIA
@@ -62,6 +67,8 @@ static int fan_init(void) {
     s_nvmlDeviceGetNumFans       = (pfnNvmlDeviceGetNumFans)      GetProcAddress(s_nvml_lib, "nvmlDeviceGetNumFans");
     s_nvmlSetPolicy              = (pfnNvmlDeviceSetFanControlPolicy)GetProcAddress(s_nvml_lib, "nvmlDeviceSetFanControlPolicy");
     s_nvmlSetFanSpeed            = (pfnNvmlDeviceSetFanSpeed_v2)  GetProcAddress(s_nvml_lib, "nvmlDeviceSetFanSpeed_v2");
+    s_nvmlGetTemp                = (pfnNvmlDeviceGetTemperature)   GetProcAddress(s_nvml_lib, "nvmlDeviceGetTemperature");
+    s_nvmlGetPower               = (pfnNvmlDeviceGetPowerUsage)    GetProcAddress(s_nvml_lib, "nvmlDeviceGetPowerUsage");
 
     if (!s_nvmlInit || !s_nvmlShutdown || !s_nvmlDeviceGetHandleByIndex ||
         !s_nvmlDeviceGetNumFans || !s_nvmlSetPolicy || !s_nvmlSetFanSpeed) {
@@ -84,6 +91,32 @@ static void fan_set(int percent) {
         s_nvmlSetPolicy(s_nvml_device, i, NVML_FAN_POLICY_MANUAL);
         s_nvmlSetFanSpeed(s_nvml_device, i, (unsigned int)percent);
     }
+}
+
+// Devuelve temperatura GPU en °C, o -1 si no disponible
+static int temp_read(void) {
+    if (!s_fan_ready || !s_nvmlGetTemp) return -1;
+    unsigned int t = 0;
+    return (s_nvmlGetTemp(s_nvml_device, NVML_TEMPERATURE_GPU, &t) == 0) ? (int)t : -1;
+}
+
+// Devuelve consumo en vatios, o -1 si no disponible
+static int power_read(void) {
+    if (!s_fan_ready || !s_nvmlGetPower) return -1;
+    unsigned int mw = 0;
+    return (s_nvmlGetPower(s_nvml_device, &mw) == 0) ? (int)(mw / 1000) : -1;
+}
+
+// Curva agresiva: 50% a <=55°C, 100% a >=70°C. Devuelve el % aplicado.
+static int fan_update_by_temp(int temp, int max_pct) {
+    if (!s_fan_ready || temp < 0) return -1;
+    int pct;
+    if      (temp <= 55) pct = 50;
+    else if (temp >= 70) pct = 100;
+    else                 pct = 50 + (temp - 55) * 50 / 15;
+    if (pct > max_pct) pct = max_pct;
+    fan_set(pct);
+    return pct;
 }
 
 static void fan_restore(void) {
@@ -341,13 +374,10 @@ int main(int argc, char** argv) {
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
 
-    // Auto-detectar threads óptimos desde propiedades de la GPU
+    // Auto-detectar threads óptimos: 2x el nº de SMs garantiza reparto
+    // simétrico (1 bloque por SM mínimo) con mínimo overhead
     if (!threads_user_set) {
-        int auto_threads = prop.multiProcessorCount * prop.maxThreadsPerMultiProcessor;
-        // Redondear al múltiplo de THREADS_PER_BLOCK
-        auto_threads = ((auto_threads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK) * THREADS_PER_BLOCK;
-        if (auto_threads < THREADS_PER_BLOCK) auto_threads = THREADS_PER_BLOCK;
-        total_threads = auto_threads;
+        total_threads = prop.multiProcessorCount * 2 * THREADS_PER_BLOCK;
     }
 
     printf("GPU: %s\n", prop.name);
@@ -360,10 +390,10 @@ int main(int argc, char** argv) {
     signal(SIGINT, sig_handler);
     if (fan_percent > 0) {
         if (fan_init()) {
-            printf("Ventiladores: control activado (%d%%)\n\n", fan_percent);
+            printf("Ventiladores: control dinamico (max: %d%%)\n\n", fan_percent);
         } else {
             printf("Ventiladores: control no disponible\n");
-            printf("  (ejecuta como Administrador o drivers sin soporte)\n\n");
+            printf("  (actualiza los drivers NVIDIA a 520+)\n\n");
         }
     } else {
         printf("Ventiladores: sin cambio (-f 0)\n\n");
@@ -404,7 +434,6 @@ int main(int argc, char** argv) {
     cudaMemset(d_total_checked, 0, sizeof(uint64_t));
     
     // Loop principal
-    if (fan_percent > 0) fan_set(fan_percent);
     printf("Buscando...\n");
     
     clock_t start_time = clock();
@@ -447,19 +476,32 @@ int main(int argc, char** argv) {
             break;
         }
         
+        // Leer sensores y ajustar ventilador
+        int gpu_temp  = temp_read();
+        int gpu_watts = power_read();
+        int cur_fan   = -1;
+        if (fan_percent > 0) cur_fan = fan_update_by_temp(gpu_temp, fan_percent);
+
         // Mostrar progreso
         uint64_t total_checked;
         cudaMemcpy(&total_checked, d_total_checked, sizeof(uint64_t), cudaMemcpyDeviceToHost);
-        
+
         clock_t current_time = clock();
         double elapsed = (double)(current_time - start_time) / CLOCKS_PER_SEC;
-        
+
         if (elapsed > 0) {
             double speed = (total_checked - last_checked) / elapsed / 1000000.0;
-            printf("\rComprobadas: %llu M | Velocidad: %.2f M/s    ", 
-                   (unsigned long long)(total_checked / 1000000), speed);
+            char temp_str[16]  = "";
+            char fan_str[16]   = "";
+            char power_str[16] = "";
+            if (gpu_temp  >= 0) snprintf(temp_str,  sizeof(temp_str),  " | Temp: %dC", gpu_temp);
+            if (cur_fan   >= 0) snprintf(fan_str,   sizeof(fan_str),   " | Fan: %d%%", cur_fan);
+            if (gpu_watts >= 0) snprintf(power_str, sizeof(power_str), " | %dW", gpu_watts);
+            printf("\rComprobadas: %llu M | Vel: %.2f M/s%s%s%s   ",
+                   (unsigned long long)(total_checked / 1000000), speed,
+                   temp_str, fan_str, power_str);
             fflush(stdout);
-            
+
             last_checked = total_checked;
             start_time = current_time;
         }

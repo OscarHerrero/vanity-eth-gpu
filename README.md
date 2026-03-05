@@ -245,7 +245,7 @@ vanity_eth.exe [opciones]
 | `-i` | Case insensitive: `a` y `A` se tratan igual | activo |
 | `-c` | Case sensitive: distingue mayúsculas/minúsculas | — |
 | `-t <N>` | Total de threads GPU (múltiplo de 256) | auto |
-| `-f <0-100>` | Velocidad de ventiladores en % (solo Windows + NVIDIA) | `100` |
+| `-f <0-100>` | Velocidad **máxima** de ventiladores en % (solo Windows + NVIDIA) | `100` |
 | `-h` | Mostrar ayuda | — |
 
 Se requiere al menos `-p` o `-s`.
@@ -262,8 +262,8 @@ vanity_eth -s beef
 # Prefijo Y sufijo a la vez
 vanity_eth -p dead -s beef
 
-# Threads manuales y ventiladores al 80%
-vanity_eth -p 1337 -t 131072 -f 80
+# Threads manuales y ventiladores con máximo al 80%
+vanity_eth -p 1337 -t 19456 -f 80
 
 # Sin control de ventiladores
 vanity_eth -p cafe -f 0
@@ -282,12 +282,12 @@ Case sensitive: no
 
 GPU: NVIDIA GeForce RTX 3060 Ti
 Compute capability: 8.6
-Threads totales: 58368  (228 bloques x 256 threads) [auto]
+Threads totales: 19456  (76 bloques x 256 threads) [auto]
 
-Ventiladores: control activado (100%)
+Ventiladores: control dinamico (max: 100%)
 
 Buscando...
-Comprobadas: 740 M | Velocidad: 142.3 M/s
+Comprobadas: 45 M | Vel: 2.30 M/s | Temp: 62C | Fan: 73% | 195W
 
 === ENCONTRADO! ===
 Direccion:    0xdead1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f
@@ -319,31 +319,35 @@ Finalizado.
 
 ### Threads óptimos por GPU
 
-El programa auto-detecta los threads al arrancar. Usa `-t` solo para sobreescribir el valor.
+El programa auto-detecta los threads al arrancar usando la fórmula `SMs × 2 × 256`.
+Usa `-t` solo si quieres ajustar manualmente.
 
-| GPU | SMs | Threads auto | `-t` sugerido |
+> **Importante:** el rendimiento es óptimo con threads que sean **múltiplo exacto del número de SMs × 256**.
+> El valor auto (2× SMs) es el punto mínimo garantizado. El sugerido (3× SMs) da un ~3% más.
+
+| GPU | SMs | Threads auto (2×) | `-t` sugerido (3×) |
 |---|---|---|---|
-| RTX 4090 | 128 | ~196,608 | 262144 |
-| RTX 4080 Super | 80 | ~122,880 | 131072 |
-| RTX 4080 | 76 | ~116,736 | 131072 |
-| RTX 4070 Ti Super | 66 | ~101,376 | 131072 |
-| RTX 4070 Ti | 60 | ~92,160 | 131072 |
-| RTX 4070 Super | 56 | ~86,016 | 131072 |
-| RTX 4070 | 46 | ~70,656 | 65536 |
-| RTX 4060 Ti | 34 | ~52,224 | 65536 |
-| RTX 3090 Ti / 3090 | 82 | ~125,952 | 131072 |
-| RTX 3080 Ti | 80 | ~122,880 | 131072 |
-| RTX 3080 | 68 | ~104,448 | 131072 |
-| RTX 3070 Ti / 3070 | 46 | ~70,656 | 65536 |
-| **RTX 3060 Ti** | **38** | **~58,368** | **65536** |
-| RTX 3060 | 28 | ~43,008 | 65536 |
-| RTX 2080 Ti | 68 | ~87,040 | 131072 |
-| RTX 2080 Super | 48 | ~61,440 | 65536 |
-| RTX 2070 | 36 | ~46,080 | 65536 |
-| GTX 1080 Ti | 28 | ~57,344 | 65536 |
-| GTX 1080 | 20 | ~40,960 | 32768 |
-| GTX 1070 | 15 | ~30,720 | 32768 |
-| GTX 1060 6GB | 10 | ~20,480 | 16384 |
+| RTX 4090 | 128 | 65,536 | 98,304 |
+| RTX 4080 Super | 80 | 40,960 | 61,440 |
+| RTX 4080 | 76 | 38,912 | 58,368 |
+| RTX 4070 Ti Super | 66 | 33,792 | 50,688 |
+| RTX 4070 Ti | 60 | 30,720 | 46,080 |
+| RTX 4070 Super | 56 | 28,672 | 43,008 |
+| RTX 4070 | 46 | 23,552 | 35,328 |
+| RTX 4060 Ti | 34 | 17,408 | 26,112 |
+| RTX 3090 Ti / 3090 | 82 | 41,984 | 62,976 |
+| RTX 3080 Ti | 80 | 40,960 | 61,440 |
+| RTX 3080 | 68 | 34,816 | 52,224 |
+| RTX 3070 Ti / 3070 | 46 | 23,552 | 35,328 |
+| **RTX 3060 Ti** | **38** | **19,456** | **29,184** |
+| RTX 3060 | 28 | 14,336 | 21,504 |
+| RTX 2080 Ti | 68 | 34,816 | 52,224 |
+| RTX 2080 Super | 48 | 24,576 | 36,864 |
+| RTX 2070 | 36 | 18,432 | 27,648 |
+| GTX 1080 Ti | 28 | 14,336 | 21,504 |
+| GTX 1080 | 20 | 10,240 | 15,360 |
+| GTX 1070 | 15 | 7,680 | 11,520 |
+| GTX 1060 6GB | 10 | 5,120 | 7,680 |
 
 ---
 
@@ -351,33 +355,56 @@ El programa auto-detecta los threads al arrancar. Usa `-t` solo para sobreescrib
 
 Velocidades aproximadas (pueden variar según driver, temperatura y configuración):
 
-| GPU | Maddr/s aprox. |
+| GPU | M addr/s aprox. |
 |---|---|
-| RTX 4090 | ~500 M/s |
-| RTX 4080 | ~350 M/s |
-| RTX 3090 | ~300 M/s |
-| RTX 3080 | ~280 M/s |
-| **RTX 3060 Ti** | **~150 M/s** |
-| RTX 3060 | ~100 M/s |
-| RTX 2080 Ti | ~200 M/s |
-| GTX 1080 Ti | ~80 M/s |
-| GTX 1070 | ~50 M/s |
+| RTX 4090 | ~8 M/s |
+| RTX 4080 | ~6.5 M/s |
+| RTX 3090 | ~5 M/s |
+| RTX 3080 | ~4 M/s |
+| **RTX 3060 Ti** | **~2.3 M/s** ✓ medido |
+| RTX 3060 | ~1.7 M/s |
+| RTX 2080 Ti | ~4 M/s |
+| GTX 1080 Ti | ~1.7 M/s |
+| GTX 1070 | ~0.9 M/s |
+
+> Valores estimados escalando por número de SMs, excepto RTX 3060 Ti que es valor medido.
+> La arquitectura también influye: RTX 40xx puede rendir más de lo estimado.
 
 ---
 
-## Control de ventiladores
+## Control de ventiladores y monitorización
 
-> ⚠️ **Si no ejecutas el programa desde una CMD abierta como Administrador, los ventiladores NO se activarán desde el primer momento**, dejando la GPU trabajando a plena carga sin refrigeración controlada.
-> El autor no se hace responsable de daños en el hardware derivados de no seguir este procedimiento.
+- Disponible **solo en Windows** con GPU NVIDIA. En Linux el programa funciona normalmente sin tocar los ventiladores.
+- Usa la librería NVML (carga dinámica, no requiere instalar nada extra ni permisos especiales).
+- No se requiere ejecutar como Administrador.
+- Si aparece "control no disponible", actualiza los drivers NVIDIA (520+).
 
-- Disponible **solo en Windows** con GPU NVIDIA.
-- Para que el control de ventiladores funcione debes abrir una **CMD como Administrador** y ejecutar el programa desde ahí:
-  1. Pulsa `Win`, escribe `cmd`, clic derecho → **"Ejecutar como administrador"**
-  2. Navega a la carpeta del programa: `cd ruta\a\vanity_eth`
-  3. Ejecuta: `vanity_eth.exe -p dead -f 100`
-- Usa la librería NVML (carga dinámica, no requiere instalar nada extra).
-- Al terminar o al pulsar `Ctrl+C`, los ventiladores vuelven al modo automático.
-- En Linux, o sin permisos de administrador, el programa continúa normalmente sin tocar los ventiladores.
+### Control dinámico por temperatura
+
+El programa ajusta los ventiladores automáticamente según la temperatura de la GPU:
+
+| Temperatura | Velocidad ventilador |
+|---|---|
+| ≤ 55°C | 50% |
+| 62°C | ~73% |
+| ≥ 70°C | 100% |
+
+El parámetro `-f` es el **límite máximo** (ej: `-f 80` nunca superará el 80% aunque la GPU llegue a 70°C).
+Usa `-f 0` para desactivar el control de ventiladores completamente.
+
+Al terminar o pulsar `Ctrl+C`, los ventiladores vuelven al modo automático de la GPU.
+
+### Monitorización en tiempo real
+
+Cuando NVML está disponible (control de ventiladores activo), la línea de progreso muestra:
+```
+Comprobadas: 45 M | Vel: 2.30 M/s | Temp: 62C | Fan: 73% | 195W
+```
+- **Temp**: temperatura actual de la GPU en °C
+- **Fan**: velocidad de ventiladores actualmente aplicada
+- **W**: consumo eléctrico de la GPU en vatios
+
+> Con `-f 0` no se inicializa NVML y no se muestran temperatura ni vatios.
 
 **En Linux**, para controlar ventiladores manualmente usa `nvidia-settings` o `nvidia-smi`:
 ```bash
@@ -394,16 +421,16 @@ nvidia-settings -a "[gpu:0]/GPUFanControlState=1" -a "[fan:0]/GPUTargetFanSpeed=
 
 Cada carácter hex reduce la probabilidad en 1/16 (prefijos y sufijos son independientes).
 
-| Longitud | Probabilidad | RTX 3060 Ti (~150 M/s) | RTX 4090 (~500 M/s) |
+| Longitud | Probabilidad | RTX 3060 Ti (~2.3 M/s) | RTX 4090 (~8 M/s) |
 |---|---|---|---|
 | 1 hex | 1/16 | < 1 segundo | < 1 segundo |
 | 2 hex | 1/256 | < 1 segundo | < 1 segundo |
 | 3 hex | 1/4,096 | < 1 segundo | < 1 segundo |
-| 4 hex | 1/65,536 | ~1 segundo | < 1 segundo |
-| 5 hex | 1/1,048,576 | ~7 segundos | ~2 segundos |
-| 6 hex | 1/16,777,216 | ~2 minutos | ~30 segundos |
-| 7 hex | 1/268,435,456 | ~30 minutos | ~9 minutos |
-| 8 hex | 1/4,294,967,296 | ~8 horas | ~2.5 horas |
+| 4 hex | 1/65,536 | < 1 segundo | < 1 segundo |
+| 5 hex | 1/1,048,576 | ~1 segundo | < 1 segundo |
+| 6 hex | 1/16,777,216 | ~7 segundos | ~2 segundos |
+| 7 hex | 1/268,435,456 | ~2 minutos | ~30 segundos |
+| 8 hex | 1/4,294,967,296 | ~31 minutos | ~9 minutos |
 
 > Tiempos promedio estadístico. El resultado puede llegar antes o después.
 > Con prefijo **y** sufijo simultáneos, multiplica las probabilidades.
