@@ -3,6 +3,8 @@
 Generador de direcciones Ethereum personalizadas usando aceleración GPU NVIDIA CUDA.
 Encuentra una dirección con el **prefijo** y/o **sufijo** hexadecimal que quieras, a velocidades de cientos de millones de intentos por segundo.
 
+Soporta **múltiples targets simultáneos**: puedes buscar varias combinaciones a la vez y parar al encontrar la primera, o continuar hasta encontrarlas todas.
+
 > **Solo GPUs NVIDIA** — Requiere CUDA (Compute Capability ≥ 5.0).
 > Las GPUs AMD no están soportadas.
 > macOS no está soportado (NVIDIA dejó CUDA en macOS tras la versión 10.2).
@@ -31,6 +33,7 @@ No necesitas instalar CUDA Toolkit ni Visual Studio. Descarga, ejecuta y listo.
   - [Windows](#compilación-en-windows)
   - [Linux](#compilación-en-linux)
 - [Uso](#uso)
+  - [Múltiples targets](#múltiples-targets)
 - [GPUs soportadas y arquitecturas CUDA](#gpus-soportadas-y-arquitecturas-cuda)
 - [Rendimiento](#rendimiento)
 - [Control de ventiladores](#control-de-ventiladores)
@@ -240,15 +243,18 @@ vanity_eth.exe [opciones]
 
 | Parámetro | Descripción | Defecto |
 |---|---|---|
-| `-p <hex>` | Prefijo hexadecimal a buscar (sin `0x`) | — |
-| `-s <hex>` | Sufijo hexadecimal a buscar (sin `0x`) | — |
+| `-p <hex>` | Prefijo hexadecimal a buscar (sin `0x`). **Repetible** para múltiples targets. | — |
+| `-s <hex>` | Sufijo hexadecimal a buscar (sin `0x`). **Repetible** para múltiples targets. | — |
+| `--targets <file>` | Cargar targets desde archivo (se acumula con `-p`/`-s`) | — |
+| `-a` | Buscar **todos** los targets (no para al primero encontrado) | — |
+| `-o <file>` | Archivo donde guardar los resultados (solo con `-a`) | `found.txt` |
 | `-i` | Case insensitive: `a` y `A` se tratan igual | activo |
 | `-c` | Case sensitive: distingue mayúsculas/minúsculas | — |
 | `-t <N>` | Total de threads GPU (múltiplo de 256) | auto |
 | `-f <0-100>` | Velocidad **máxima** de ventiladores en % (solo Windows + NVIDIA) | `100` |
 | `-h` | Mostrar ayuda | — |
 
-Se requiere al menos `-p` o `-s`.
+Se requiere al menos `-p`, `-s` o `--targets`.
 
 ### Ejemplos
 
@@ -276,8 +282,8 @@ vanity_eth -p Dead -c
 
 ```
 === Vanity ETH Address Generator ===
-Prefijo: dead
-Sufijo:  (ninguno)
+Targets (1):
+  [0] prefijo: dead                 sufijo: (ninguno)
 Case sensitive: no
 
 GPU: NVIDIA GeForce RTX 3060 Ti
@@ -290,11 +296,105 @@ Buscando...
 Comprobadas: 45 M | Vel: 2.30 M/s | Temp: 62C | Fan: 73% | 195W
 
 === ENCONTRADO! ===
-Direccion:    0xdead1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f
+Target [0]:  prefijo: dead                 sufijo: (ninguno)
+Direccion:     0xdead1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f
 Clave privada: 0xabcdef...
 
 Finalizado.
 ```
+
+---
+
+## Múltiples targets
+
+Puedes buscar varias combinaciones de prefijo/sufijo simultáneamente. El programa busca todas a la vez sin pérdida de rendimiento apreciable (hasta 64 targets).
+
+### Opción A: flags repetidos por CLI
+
+Empareja `-p` y `-s` por orden. Usa `-` si un campo no aplica:
+
+```bash
+# Dos targets: (dead, beef) y (0000, 1234)
+vanity_eth -p dead -s beef -p 0000 -s 1234
+
+# Solo prefijos, sin sufijo
+vanity_eth -p dead -p cafe -p 1337
+
+# Solo sufijos
+vanity_eth -s 0000 -s beef
+```
+
+### Opción B: archivo de targets
+
+Crea un archivo de texto con un target por línea. Usa `-` para omitir prefijo o sufijo:
+
+```
+# Comentario
+0000 1234        <- prefijo y sufijo
+dead -           <- solo prefijo
+- beef           <- solo sufijo
+```
+
+```bash
+vanity_eth --targets mis_targets.txt
+```
+
+El repositorio incluye `targets.example.txt` como plantilla lista para editar.
+
+### Buscar todos los targets (`-a`)
+
+Por defecto el programa para al encontrar el **primer** target. Con `-a` continúa hasta encontrarlos **todos**, guardando cada resultado en un archivo:
+
+```bash
+# Para al encontrar cualquiera (defecto)
+vanity_eth -p dead -s beef -p 0000 -s 1234
+
+# Busca todos y guarda en found.txt (defecto)
+vanity_eth -p dead -s beef -p 0000 -s 1234 -a
+
+# Busca todos y guarda en otro archivo
+vanity_eth --targets mis_targets.txt -a -o resultados.txt
+```
+
+Salida en modo `--all`:
+
+```
+=== Vanity ETH Address Generator ===
+Targets (3):
+  [0] prefijo: dead                 sufijo: beef
+  [1] prefijo: 0000                 sufijo: 1234
+  [2] prefijo: cafe                 sufijo: (ninguno)
+Case sensitive: no
+
+Guardando resultados en: found.txt
+
+Buscando todos los targets...
+[0/3] Comprobadas: 12 M | Vel: 2.31 M/s | Temp: 63C | Fan: 75% | 197W
+
+=== ENCONTRADO [1/3]! ===
+Target [2]:  prefijo: cafe                 sufijo: (ninguno)
+Direccion:     0xcafe...
+Clave privada: 0x...
+
+[1/3 encontrados - buscando los 2 restantes...]
+[1/3] Comprobadas: 45 M | Vel: 2.30 M/s | Temp: 64C | Fan: 76% | 198W
+...
+Todos los targets encontrados.
+```
+
+Formato del archivo de salida (`found.txt`):
+
+```
+[2026-03-05 22:09:08] Target [2]:  prefijo: cafe  sufijo: (ninguno)
+Direccion:     0xcafe...
+Clave privada: 0x...
+
+[2026-03-05 22:11:43] Target [0]:  prefijo: dead  sufijo: beef
+Direccion:     0xdead...
+Clave privada: 0x...
+```
+
+> El archivo se escribe en modo **append**: ejecuciones sucesivas acumulan resultados sin sobreescribir los anteriores.
 
 ---
 
@@ -439,7 +539,8 @@ Cada carácter hex reduce la probabilidad en 1/16 (prefijos y sufijos son indepe
 
 ## Seguridad
 
-- La clave privada **nunca se transmite ni guarda** en ningún fichero automáticamente; aparece solo en pantalla.
+- En modo normal (sin `-a`), la clave privada **nunca se transmite ni guarda** en ningún fichero; aparece solo en pantalla.
+- Con `-a`, las claves **sí se escriben** en el archivo de salida (`found.txt` u el indicado con `-o`). Protege ese archivo como cualquier clave privada y bórralo cuando ya no lo necesites.
 - Anota la clave privada inmediatamente en un lugar seguro (gestor de contraseñas, papel, etc.).
 - **Nunca compartas tu clave privada con nadie.**
 - Para importar en MetaMask: *Importar cuenta → Clave privada*.
@@ -452,14 +553,15 @@ Cada carácter hex reduce la probabilidad en 1/16 (prefijos y sufijos son indepe
 ```
 vanity_eth_gpu/
 ├── src/
-│   ├── main.cu          # Punto de entrada, kernel launcher, CLI
-│   ├── secp256k1.cuh    # Operaciones de curva elíptica secp256k1 (GPU)
-│   ├── uint256.cuh      # Aritmética de 256 bits (GPU)
-│   ├── keccak256.cuh    # Hash Keccak-256 (GPU)
-│   └── matcher.cuh      # Comparación de prefijo/sufijo (GPU)
-├── build.bat            # Script de compilación para Windows
-├── build.sh             # Script de compilación para Linux
-├── Makefile             # Makefile para Linux
+│   ├── main.cu              # Punto de entrada, kernel launcher, CLI
+│   ├── secp256k1.cuh        # Operaciones de curva elíptica secp256k1 (GPU)
+│   ├── uint256.cuh          # Aritmética de 256 bits (GPU)
+│   ├── keccak256.cuh        # Hash Keccak-256 (GPU)
+│   └── matcher.cuh          # Comparación de prefijo/sufijo (GPU)
+├── targets.example.txt      # Plantilla de archivo de targets
+├── build.bat                # Script de compilación para Windows
+├── build.sh                 # Script de compilación para Linux
+├── Makefile                 # Makefile para Linux
 └── README.md
 ```
 

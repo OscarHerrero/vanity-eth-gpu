@@ -152,25 +152,31 @@ static void sig_handler(int sig) { (void)sig; exit(1); }
 #define THREADS_PER_BLOCK 256
 #define BLOCKS 256
 #define ITERATIONS_PER_THREAD 1024
+#define MAX_TARGETS 64
 
 // Estructura para resultados encontrados
 typedef struct {
     uint256_t private_key;
     uint8_t address[20];
     int found;
+    int target_idx;   // índice del target que coincidió
 } result_t;
 
-// Patrón en constant memory
-__constant__ pattern_t d_pattern;
+// Patrones en constant memory
+__constant__ pattern_t d_patterns[MAX_TARGETS];
+__constant__ int       d_num_patterns;
 
-// Generador de números aleatorios simple (xorshift)
-__device__ uint32_t xorshift32(uint32_t* state) {
-    uint32_t x = *state;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *state = x;
-    return x;
+// RNG xorshift128: periodo 2^128-1, permite explorar todo el espacio de claves privadas
+__device__ uint32_t xorshift128(uint32_t s[4]) {
+    uint32_t t = s[3];
+    uint32_t tmp = s[0];
+    s[3] = s[2];
+    s[2] = s[1];
+    s[1] = tmp;
+    t ^= t << 11;
+    t ^= t >> 8;
+    s[0] = t ^ tmp ^ (tmp >> 19);
+    return s[0];
 }
 
 // Kernel principal
@@ -181,9 +187,13 @@ __global__ void vanity_search_kernel(
     int max_results
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    // Estado del RNG
-    uint32_t rng_state = seeds[idx];
+
+    // Estado del RNG (128 bits = 4 x uint32)
+    uint32_t s[4];
+    s[0] = seeds[idx * 4 + 0];
+    s[1] = seeds[idx * 4 + 1];
+    s[2] = seeds[idx * 4 + 2];
+    s[3] = seeds[idx * 4 + 3];
     
     // Clave privada
     uint256_t privkey;
@@ -195,7 +205,7 @@ __global__ void vanity_search_kernel(
         // Generar clave privada aleatoria
         #pragma unroll
         for (int i = 0; i < 8; i++) {
-            privkey.d[i] = xorshift32(&rng_state);
+            privkey.d[i] = xorshift128(s);
         }
         
         // Asegurar que la clave está en el rango válido [1, n-1]
@@ -216,9 +226,15 @@ __global__ void vanity_search_kernel(
         uint8_t address[20];
         get_eth_address(&pub_affine.x, &pub_affine.y, address);
         
-        // Comprobar si coincide con el patrón
-        if (match_address(address, &d_pattern)) {
-            // Encontrado! Guardar resultado
+        // Comprobar si coincide con algún target
+        int matched = -1;
+        for (int ti = 0; ti < d_num_patterns; ti++) {
+            if (match_address(address, &d_patterns[ti])) {
+                matched = ti;
+                break;
+            }
+        }
+        if (matched >= 0) {
             int slot = atomicAdd((int*)&results[0].found, 1);
             if (slot < max_results) {
                 uint256_copy(&results[slot].private_key, &privkey);
@@ -226,13 +242,17 @@ __global__ void vanity_search_kernel(
                 for (int i = 0; i < 20; i++) {
                     results[slot].address[i] = address[i];
                 }
+                results[slot].target_idx = matched;
             }
             local_found = 1;
         }
     }
     
     // Guardar estado del RNG para la siguiente iteración
-    seeds[idx] = rng_state;
+    seeds[idx * 4 + 0] = s[0];
+    seeds[idx * 4 + 1] = s[1];
+    seeds[idx * 4 + 2] = s[2];
+    seeds[idx * 4 + 3] = s[3];
     
     // Actualizar contador total
     atomicAdd((unsigned long long*)total_checked, ITERATIONS_PER_THREAD);
@@ -241,16 +261,25 @@ __global__ void vanity_search_kernel(
 void print_usage(const char* prog) {
     printf("Uso: %s [opciones]\n", prog);
     printf("Opciones:\n");
-    printf("  -p <prefijo>   Prefijo hexadecimal a buscar (sin 0x)\n");
-    printf("  -s <sufijo>    Sufijo hexadecimal a buscar (sin 0x)\n");
-    printf("  -i             Case insensitive (por defecto)\n");
-    printf("  -c             Case sensitive\n");
-    printf("  -t <threads>   Total de threads GPU (multiplo de 256, defecto: auto desde GPU)\n");
-    printf("  -f <0-100>     Velocidad de ventiladores en %% (defecto: 100, 0=sin cambio)\n");
-    printf("  -h             Mostrar esta ayuda\n");
+    printf("  -p <prefijo>      Prefijo hex a buscar (sin 0x). Repetible para multiples targets.\n");
+    printf("  -s <sufijo>       Sufijo hex a buscar (sin 0x). Repetible para multiples targets.\n");
+    printf("  --targets <file>  Cargar targets desde archivo (se acumulan con -p/-s)\n");
+    printf("  -i                Case insensitive (por defecto)\n");
+    printf("  -c                Case sensitive\n");
+    printf("  -a                Buscar TODOS los targets (no para al primero)\n");
+    printf("  -o <file>         Archivo de salida para resultados (defecto: found.txt)\n");
+    printf("  -t <threads>      Total de threads GPU (multiplo de 256, defecto: auto)\n");
+    printf("  -f <0-100>        Velocidad de ventiladores en %% (defecto: 100, 0=sin cambio)\n");
+    printf("  -h                Mostrar esta ayuda\n");
     printf("\nEjemplos:\n");
     printf("  %s -p dead -s beef\n", prog);
-    printf("  %s -p 1337 -t 131072 -f 80\n", prog);
+    printf("  %s -p 0000 -s 1234 -p dead -s beef\n", prog);
+    printf("  %s --targets targets.txt -a -o resultados.txt\n", prog);
+    printf("\nFormato de archivo --targets (una linea por target):\n");
+    printf("  # Comentario\n");
+    printf("  0000 1234        <- prefijo y sufijo\n");
+    printf("  dead -           <- solo prefijo\n");
+    printf("  - beef           <- solo sufijo\n");
 }
 
 // Versiones host de las funciones de conversión
@@ -279,20 +308,170 @@ void host_privkey_to_hex(const uint256_t* key, char* hex_str) {
     hex_str[64] = '\0';
 }
 
+// Convierte un string a minúsculas hex y parsea. Devuelve 0 ok, -1 error.
+static int parse_pattern_str(const char* str, uint8_t* bytes, int* nibble_len) {
+    char lower[41];
+    int len = (int)strlen(str);
+    if (len > 40) return -1;
+    for (int i = 0; i < len; i++)
+        lower[i] = (str[i] >= 'A' && str[i] <= 'F') ? str[i] + 32 : str[i];
+    lower[len] = '\0';
+    return parse_hex_pattern(lower, bytes, nibble_len);
+}
+
+// Añade un target al array. disp_pre/disp_suf guardan los strings originales para display.
+// Devuelve 0 ok, -1 error.
+static int add_target(pattern_t* patterns, char disp_pre[][41], char disp_suf[][41],
+                      int* count, int case_sensitive,
+                      const char* prefix, const char* suffix) {
+    if (*count >= MAX_TARGETS) {
+        printf("Aviso: maximo de targets (%d) alcanzado, ignorando el resto.\n", MAX_TARGETS);
+        return 0;
+    }
+    pattern_t* p = &patterns[*count];
+    memset(p, 0, sizeof(pattern_t));
+    p->case_sensitive = case_sensitive;
+
+    int has_prefix = (prefix && strlen(prefix) > 0 && strcmp(prefix, "-") != 0);
+    int has_suffix = (suffix && strlen(suffix) > 0 && strcmp(suffix, "-") != 0);
+
+    if (has_prefix) {
+        if (parse_pattern_str(prefix, p->prefix, &p->prefix_len) < 0) {
+            printf("Error: prefijo invalido '%s'\n", prefix);
+            return -1;
+        }
+        strncpy(disp_pre[*count], prefix, 40);
+        // normalizar a minúsculas para display
+        for (int j = 0; disp_pre[*count][j]; j++)
+            if (disp_pre[*count][j] >= 'A' && disp_pre[*count][j] <= 'F')
+                disp_pre[*count][j] += 32;
+    } else {
+        disp_pre[*count][0] = '\0';
+    }
+
+    if (has_suffix) {
+        if (parse_pattern_str(suffix, p->suffix, &p->suffix_len) < 0) {
+            printf("Error: sufijo invalido '%s'\n", suffix);
+            return -1;
+        }
+        strncpy(disp_suf[*count], suffix, 40);
+        for (int j = 0; disp_suf[*count][j]; j++)
+            if (disp_suf[*count][j] >= 'A' && disp_suf[*count][j] <= 'F')
+                disp_suf[*count][j] += 32;
+    } else {
+        disp_suf[*count][0] = '\0';
+    }
+
+    if (p->prefix_len == 0 && p->suffix_len == 0) {
+        printf("Error: target sin prefijo ni sufijo (usa - para omitir uno)\n");
+        return -1;
+    }
+    (*count)++;
+    return 0;
+}
+
+// Carga targets desde archivo. Formato por linea: <prefijo> <sufijo> (- para ninguno)
+static int load_targets_file(const char* filename, pattern_t* patterns,
+                             char disp_pre[][41], char disp_suf[][41],
+                             int* count, int case_sensitive) {
+    FILE* f = fopen(filename, "r");
+    if (!f) {
+        printf("Error: no se pudo abrir '%s'\n", filename);
+        return -1;
+    }
+    char line[256];
+    int line_num = 0;
+    while (fgets(line, sizeof(line), f)) {
+        line_num++;
+        int len = (int)strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r' || line[len-1] == ' '))
+            line[--len] = '\0';
+        if (len == 0 || line[0] == '#') continue;
+
+        char tok1[41] = "", tok2[41] = "";
+        int n = sscanf(line, "%40s %40s", tok1, tok2);
+        if (n < 1) continue;
+
+        const char* pref = tok1;
+        const char* suff = (n >= 2) ? tok2 : "-";
+
+        if (add_target(patterns, disp_pre, disp_suf, count, case_sensitive, pref, suff) < 0) {
+            printf("  (linea %d: '%s')\n", line_num, line);
+            fclose(f);
+            return -1;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+// Mezcla de bits de alta calidad para expandir semillas
+static uint64_t splitmix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+// Rellena buf con n uint32 criptograficamente aleatorios
+static void csprng_fill(uint32_t* buf, int n) {
+#ifdef _WIN32
+    // RtlGenRandom (SystemFunction036) via carga dinamica - disponible en todos los Windows
+    typedef BOOLEAN (WINAPI* pRtlGenRandom_t)(PVOID, ULONG);
+    HMODULE advapi = LoadLibraryA("Advapi32.dll");
+    pRtlGenRandom_t pRtlGenRandom = advapi
+        ? (pRtlGenRandom_t)GetProcAddress(advapi, "SystemFunction036") : NULL;
+    if (pRtlGenRandom && pRtlGenRandom(buf, (ULONG)(n * sizeof(uint32_t)))) {
+        FreeLibrary(advapi);
+        return;
+    }
+    if (advapi) FreeLibrary(advapi);
+    // Fallback: mezcla de fuentes de alta resolucion
+    LARGE_INTEGER qpc;
+    QueryPerformanceCounter(&qpc);
+    uint64_t s0 = (uint64_t)qpc.QuadPart ^ ((uint64_t)GetCurrentProcessId() << 32);
+    uint64_t s1 = (uint64_t)GetTickCount64() ^ ((uint64_t)time(NULL) * 6364136223846793005ULL);
+    for (int i = 0; i < n; i++)
+        buf[i] = (uint32_t)(splitmix64(s0 + (uint64_t)i) ^ splitmix64(s1 - (uint64_t)i));
+#else
+    FILE* f = fopen("/dev/urandom", "rb");
+    if (f) {
+        fread(buf, sizeof(uint32_t), n, f);
+        fclose(f);
+    } else {
+        for (int i = 0; i < n; i++)
+            buf[i] = (uint32_t)time(NULL) ^ (uint32_t)(i * 2654435761U);
+    }
+#endif
+}
+
 int main(int argc, char** argv) {
     // Parsear argumentos
-    char prefix[41] = "";
-    char suffix[41] = "";
-    int case_sensitive = 0;
-    int total_threads     = 0;     // 0 = auto-detectar desde GPU
-    int threads_user_set  = 0;
-    int fan_percent       = 100;   // defecto: 100%
+    char cli_prefixes[MAX_TARGETS][41];
+    char cli_suffixes[MAX_TARGETS][41];
+    int  n_prefixes    = 0;
+    int  n_suffixes    = 0;
+    char targets_file[256] = "";
+    char output_file[256]  = "found.txt";
+    int  case_sensitive    = 0;
+    int  search_all        = 0;
+    int  total_threads     = 0;
+    int  threads_user_set  = 0;
+    int  fan_percent       = 100;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
-            strncpy(prefix, argv[++i], 40);
+            if (n_prefixes < MAX_TARGETS) strncpy(cli_prefixes[n_prefixes++], argv[++i], 40);
+            else { printf("Error: demasiados -p (max %d)\n", MAX_TARGETS); return 1; }
         } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
-            strncpy(suffix, argv[++i], 40);
+            if (n_suffixes < MAX_TARGETS) strncpy(cli_suffixes[n_suffixes++], argv[++i], 40);
+            else { printf("Error: demasiados -s (max %d)\n", MAX_TARGETS); return 1; }
+        } else if (strcmp(argv[i], "--targets") == 0 && i + 1 < argc) {
+            strncpy(targets_file, argv[++i], 255);
+        } else if (strcmp(argv[i], "-a") == 0) {
+            search_all = 1;
+        } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            strncpy(output_file, argv[++i], 255);
         } else if (strcmp(argv[i], "-i") == 0) {
             case_sensitive = 0;
         } else if (strcmp(argv[i], "-c") == 0) {
@@ -311,53 +490,47 @@ int main(int argc, char** argv) {
             return 0;
         }
     }
-    
-    if (strlen(prefix) == 0 && strlen(suffix) == 0) {
-        printf("Error: Debes especificar al menos un prefijo (-p) o sufijo (-s)\n\n");
+
+    // Construir lista de patrones
+    pattern_t h_patterns[MAX_TARGETS];
+    char      disp_pre[MAX_TARGETS][41];
+    char      disp_suf[MAX_TARGETS][41];
+    int       h_num_patterns = 0;
+    memset(disp_pre, 0, sizeof(disp_pre));
+    memset(disp_suf, 0, sizeof(disp_suf));
+
+    // Combinar -p y -s por índice (padding con "-" si hay diferente cantidad)
+    int max_cli = n_prefixes > n_suffixes ? n_prefixes : n_suffixes;
+    for (int i = 0; i < max_cli; i++) {
+        const char* pref = (i < n_prefixes) ? cli_prefixes[i] : "-";
+        const char* suff = (i < n_suffixes) ? cli_suffixes[i] : "-";
+        if (add_target(h_patterns, disp_pre, disp_suf, &h_num_patterns, case_sensitive, pref, suff) < 0)
+            return 1;
+    }
+
+    // Cargar desde archivo si se indicó
+    if (strlen(targets_file) > 0) {
+        if (load_targets_file(targets_file, h_patterns, disp_pre, disp_suf,
+                              &h_num_patterns, case_sensitive) < 0)
+            return 1;
+    }
+
+    if (h_num_patterns == 0) {
+        printf("Error: Debes especificar al menos un target (-p, -s, o --targets)\n\n");
         print_usage(argv[0]);
         return 1;
     }
-    
+
+    // Mostrar targets cargados
     printf("=== Vanity ETH Address Generator ===\n");
-    printf("Prefijo: %s\n", strlen(prefix) > 0 ? prefix : "(ninguno)");
-    printf("Sufijo:  %s\n", strlen(suffix) > 0 ? suffix : "(ninguno)");
+    printf("Targets (%d):\n", h_num_patterns);
+    for (int i = 0; i < h_num_patterns; i++) {
+        const char* pstr = (strlen(disp_pre[i]) > 0) ? disp_pre[i] : "(ninguno)";
+        const char* sstr = (strlen(disp_suf[i]) > 0) ? disp_suf[i] : "(ninguno)";
+        printf("  [%d] prefijo: %-20s sufijo: %s\n", i, pstr, sstr);
+    }
     printf("Case sensitive: %s\n\n", case_sensitive ? "si" : "no");
-    
-    // Preparar patrón
-    pattern_t h_pattern;
-    memset(&h_pattern, 0, sizeof(pattern_t));
-    
-    if (strlen(prefix) > 0) {
-        // Convertir a minúsculas si case insensitive
-        char prefix_lower[41];
-        for (int i = 0; prefix[i]; i++) {
-            prefix_lower[i] = (prefix[i] >= 'A' && prefix[i] <= 'F') ? 
-                              prefix[i] + 32 : prefix[i];
-        }
-        prefix_lower[strlen(prefix)] = '\0';
-        
-        if (parse_hex_pattern(prefix_lower, h_pattern.prefix, &h_pattern.prefix_len) < 0) {
-            printf("Error: Prefijo invalido\n");
-            return 1;
-        }
-    }
-    
-    if (strlen(suffix) > 0) {
-        char suffix_lower[41];
-        for (int i = 0; suffix[i]; i++) {
-            suffix_lower[i] = (suffix[i] >= 'A' && suffix[i] <= 'F') ? 
-                              suffix[i] + 32 : suffix[i];
-        }
-        suffix_lower[strlen(suffix)] = '\0';
-        
-        if (parse_hex_pattern(suffix_lower, h_pattern.suffix, &h_pattern.suffix_len) < 0) {
-            printf("Error: Sufijo invalido\n");
-            return 1;
-        }
-    }
-    
-    h_pattern.case_sensitive = case_sensitive;
-    
+
     // Verificar CUDA
     int device_count;
     cudaGetDeviceCount(&device_count);
@@ -400,29 +573,41 @@ int main(int argc, char** argv) {
     }
     
     // La tabla G_TABLE ya está inicializada en constant memory (secp256k1.cuh)
-    
-    // Copiar patrón a constant memory
-    cudaMemcpyToSymbol(d_pattern, &h_pattern, sizeof(pattern_t));
+
+    // Copiar patrones a constant memory
+    cudaMemcpyToSymbol(d_patterns,     h_patterns,     h_num_patterns * sizeof(pattern_t));
+    cudaMemcpyToSymbol(d_num_patterns, &h_num_patterns, sizeof(int));
     
     // Calcular bloques a partir de total_threads
     int blocks = total_threads / THREADS_PER_BLOCK;
 
     // Alojar memoria
     
-    uint32_t* h_seeds = (uint32_t*)malloc(total_threads * sizeof(uint32_t));
+    uint32_t* h_seeds = (uint32_t*)malloc(total_threads * 4 * sizeof(uint32_t));
     uint32_t* d_seeds;
-    cudaMalloc(&d_seeds, total_threads * sizeof(uint32_t));
-    
-    // Inicializar semillas aleatorias
-    srand((unsigned int)time(NULL));
-    for (int i = 0; i < total_threads; i++) {
-        h_seeds[i] = rand() ^ (rand() << 16);
-        if (h_seeds[i] == 0) h_seeds[i] = 1;
+    cudaMalloc(&d_seeds, total_threads * 4 * sizeof(uint32_t));
+
+    // Semillas CSPRNG: cada thread tiene 128 bits de estado unico e independiente
+    {
+        uint32_t base[4];
+        csprng_fill(base, 4);
+        uint64_t b0 = ((uint64_t)base[1] << 32) | base[0];
+        uint64_t b1 = ((uint64_t)base[3] << 32) | base[2];
+        for (int i = 0; i < total_threads; i++) {
+            uint64_t h1 = splitmix64(b0 + (uint64_t)i);
+            uint64_t h2 = splitmix64(b1 ^ ((uint64_t)i * 0x9e3779b97f4a7c15ULL));
+            h_seeds[i*4+0] = (uint32_t)(h1);
+            h_seeds[i*4+1] = (uint32_t)(h1 >> 32);
+            h_seeds[i*4+2] = (uint32_t)(h2);
+            h_seeds[i*4+3] = (uint32_t)(h2 >> 32);
+            if (!h_seeds[i*4+0] && !h_seeds[i*4+1] && !h_seeds[i*4+2] && !h_seeds[i*4+3])
+                h_seeds[i*4+0] = 1;
+        }
     }
-    cudaMemcpy(d_seeds, h_seeds, total_threads * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_seeds, h_seeds, total_threads * 4 * sizeof(uint32_t), cudaMemcpyHostToDevice);
     
-    // Resultados
-    int max_results = 10;
+    // Resultados (MAX_TARGETS para poder capturar multiples en --all)
+    int max_results = MAX_TARGETS;
     result_t* h_results = (result_t*)calloc(max_results, sizeof(result_t));
     result_t* d_results;
     cudaMalloc(&d_results, max_results * sizeof(result_t));
@@ -433,9 +618,24 @@ int main(int argc, char** argv) {
     cudaMalloc(&d_total_checked, sizeof(uint64_t));
     cudaMemset(d_total_checked, 0, sizeof(uint64_t));
     
+    // Tracking multi-target
+    int target_found_flags[MAX_TARGETS];
+    memset(target_found_flags, 0, sizeof(target_found_flags));
+    int targets_remaining = h_num_patterns;
+
+    // Abrir archivo de salida si se buscan todos
+    FILE* out_f = NULL;
+    if (search_all) {
+        out_f = fopen(output_file, "a");
+        if (!out_f)
+            printf("Aviso: no se pudo abrir '%s' — resultados solo en pantalla.\n\n", output_file);
+        else
+            printf("Guardando resultados en: %s\n\n", output_file);
+    }
+
     // Loop principal
-    printf("Buscando...\n");
-    
+    printf("Buscando%s...\n", search_all ? " todos los targets" : "");
+
     clock_t start_time = clock();
     uint64_t last_checked = 0;
     int found = 0;
@@ -459,21 +659,76 @@ int main(int argc, char** argv) {
         cudaMemcpy(h_results, d_results, max_results * sizeof(result_t), cudaMemcpyDeviceToHost);
         
         if (h_results[0].found > 0) {
-            found = 1;
-            
-            printf("\n=== ENCONTRADO! ===\n");
-            
-            // Mostrar resultado
-            char hex_addr[41];
-            char hex_key[65];
-            
-            host_address_to_hex(h_results[0].address, hex_addr);
-            host_privkey_to_hex(&h_results[0].private_key, hex_key);
-            
-            printf("Direccion:    0x%s\n", hex_addr);
-            printf("Clave privada: 0x%s\n", hex_key);
-            
-            break;
+            int nfound = h_results[0].found;
+            if (nfound > max_results) nfound = max_results;
+
+            // Deduplicar por target_idx y procesar cada resultado nuevo
+            int found_this_round[MAX_TARGETS];
+            memset(found_this_round, 0, sizeof(found_this_round));
+
+            for (int r = 0; r < nfound; r++) {
+                int tidx = h_results[r].target_idx;
+                if (tidx < 0 || tidx >= h_num_patterns) continue;
+                if (target_found_flags[tidx]) continue;   // ya encontrado antes
+                if (found_this_round[tidx])   continue;   // duplicado en este lanzamiento
+                found_this_round[tidx] = 1;
+                target_found_flags[tidx] = 1;
+                targets_remaining--;
+
+                char hex_addr[41], hex_key[65];
+                host_address_to_hex(h_results[r].address, hex_addr);
+                host_privkey_to_hex(&h_results[r].private_key, hex_key);
+
+                const char* pstr = (strlen(disp_pre[tidx]) > 0) ? disp_pre[tidx] : "(ninguno)";
+                const char* sstr = (strlen(disp_suf[tidx]) > 0) ? disp_suf[tidx] : "(ninguno)";
+
+                if (search_all)
+                    printf("\n=== ENCONTRADO [%d/%d]! ===\n",
+                           h_num_patterns - targets_remaining, h_num_patterns);
+                else
+                    printf("\n=== ENCONTRADO! ===\n");
+
+                printf("Target [%d]:  prefijo: %-20s sufijo: %s\n", tidx, pstr, sstr);
+                printf("Direccion:     0x%s\n", hex_addr);
+                printf("Clave privada: 0x%s\n", hex_key);
+
+                // Guardar en archivo
+                if (out_f) {
+                    time_t ts = time(NULL);
+                    struct tm* tm_info = localtime(&ts);
+                    char tsbuf[32];
+                    strftime(tsbuf, sizeof(tsbuf), "%Y-%m-%d %H:%M:%S", tm_info);
+                    fprintf(out_f, "[%s] Target [%d]:  prefijo: %s  sufijo: %s\n",
+                            tsbuf, tidx, pstr, sstr);
+                    fprintf(out_f, "Direccion:     0x%s\n", hex_addr);
+                    fprintf(out_f, "Clave privada: 0x%s\n\n", hex_key);
+                    fflush(out_f);
+                }
+            }
+
+            // Parar si no es modo --all o si ya encontramos todos
+            if (!search_all || targets_remaining == 0) {
+                if (search_all)
+                    printf("\nTodos los targets encontrados.\n");
+                found = 1;
+                break;
+            }
+
+            // Reconstruir patrones activos (sin los ya encontrados)
+            pattern_t active_pats[MAX_TARGETS];
+            int n_active = 0;
+            for (int i = 0; i < h_num_patterns; i++) {
+                if (!target_found_flags[i])
+                    active_pats[n_active++] = h_patterns[i];
+            }
+            cudaMemcpyToSymbol(d_patterns,     active_pats, n_active * sizeof(pattern_t));
+            cudaMemcpyToSymbol(d_num_patterns, &n_active,   sizeof(int));
+
+            // Resetear buffer de resultados para el siguiente lanzamiento
+            cudaMemset(d_results, 0, max_results * sizeof(result_t));
+
+            printf("\n[%d/%d encontrados - buscando los %d restantes...]\n",
+                   h_num_patterns - targets_remaining, h_num_patterns, targets_remaining);
         }
         
         // Leer sensores y ajustar ventilador
@@ -497,9 +752,15 @@ int main(int argc, char** argv) {
             if (gpu_temp  >= 0) snprintf(temp_str,  sizeof(temp_str),  " | Temp: %dC", gpu_temp);
             if (cur_fan   >= 0) snprintf(fan_str,   sizeof(fan_str),   " | Fan: %d%%", cur_fan);
             if (gpu_watts >= 0) snprintf(power_str, sizeof(power_str), " | %dW", gpu_watts);
-            printf("\rComprobadas: %llu M | Vel: %.2f M/s%s%s%s   ",
-                   (unsigned long long)(total_checked / 1000000), speed,
-                   temp_str, fan_str, power_str);
+            if (search_all)
+                printf("\r[%d/%d] Comprobadas: %llu M | Vel: %.2f M/s%s%s%s   ",
+                       h_num_patterns - targets_remaining, h_num_patterns,
+                       (unsigned long long)(total_checked / 1000000), speed,
+                       temp_str, fan_str, power_str);
+            else
+                printf("\rComprobadas: %llu M | Vel: %.2f M/s%s%s%s   ",
+                       (unsigned long long)(total_checked / 1000000), speed,
+                       temp_str, fan_str, power_str);
             fflush(stdout);
 
             last_checked = total_checked;
@@ -507,6 +768,9 @@ int main(int argc, char** argv) {
         }
     }
     
+    // Cerrar archivo de resultados
+    if (out_f) fclose(out_f);
+
     // Restaurar ventiladores y limpiar
     fan_cleanup();
 

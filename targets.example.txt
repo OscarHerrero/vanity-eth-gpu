@@ -1,0 +1,35 @@
+# ============================================================
+# Archivo de targets para vanity_eth_gpu
+# Uso: vanity_eth.exe --targets targets.example.txt
+# ============================================================
+#
+# Formato: una linea por target
+#   <prefijo> <sufijo>
+#
+#   - Usa - para omitir prefijo o sufijo
+#   - Sin 0x, solo hex (0-9, a-f, A-F)
+#   - Maximo 40 caracteres por campo (20 bytes)
+#   - Lineas que empiezan con # son comentarios
+#   - Lineas vacias se ignoran
+#
+# Se para la busqueda en cuanto se encuentra CUALQUIER target.
+# ============================================================
+
+# --- Solo prefijo ---
+dead -
+cafe -
+1337 -
+
+# --- Solo sufijo ---
+- 0000
+- beef
+- 1234
+
+# --- Prefijo y sufijo ---
+dead beef
+0000 1234
+cafe babe
+
+# --- Combinacion personalizada ---
+# Busca una direccion que empiece por "00" y acabe en "ff"
+00 ff

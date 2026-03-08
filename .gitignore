@@ -13,6 +13,7 @@ vanity_eth
 found.txt
 found_*.txt
 
+
 # Script de compilación local (contiene rutas específicas de cada máquina)
 compile.bat
 
@@ -36,3 +37,6 @@ Desktop.ini
 
 # macOS
 .DS_Store
+
+# Targets
+targets.txt
